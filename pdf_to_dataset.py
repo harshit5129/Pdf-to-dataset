@@ -6,8 +6,8 @@ import json
 import fitz
 from collections import Counter
 import time
-import requests
 import random
+from ollama import Client
 
 random.seed(42)
 
@@ -69,9 +69,9 @@ def validate_ai_questions(questions, chunk_idx):
     return valid_questions, invalid_count
 
 
-OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
-OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
-OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "qwen/qwen3.6-plus:free")
+OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "https://ollama.com")
+OLLAMA_API_KEY = os.environ.get("OLLAMA_API_KEY", "") or os.environ.get("OPENAI_API_KEY", "")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "gpt-oss:120b")
 QUESTIONS_PER_CHUNK = int(os.environ.get("QUESTIONS_PER_CHUNK", "8"))
 USE_AI_GENERATION = True
 
@@ -337,9 +337,9 @@ def generate_openended_questions(chunk, novel_title):
 
 
 def generate_ai_questions(chunk, novel_title, chunk_idx, num_questions=8):
-    """Generate high-quality questions using OpenRouter AI."""
-    if not OPENROUTER_API_KEY:
-        print(f"\n  Warning: OPENROUTER_API_KEY not set. Using template-based generation.")
+    """Generate high-quality questions using Ollama."""
+    if not OLLAMA_API_KEY:
+        print(f"\n  Warning: OLLAMA_API_KEY not set. Cannot generate questions.")
         return []
 
     system_prompt = f"""You are an expert literary analyst and educator specializing in creating high-quality comprehension questions for novels and literature. 
@@ -383,28 +383,45 @@ Generate exactly {num_questions} questions total, with variety in types."""
 Generate questions that test understanding of plot, characters, themes, vocabulary, and deeper meaning. Make questions specific to this exact text."""
 
     try:
-        headers = {
-            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://github.com/Pdf-to-dataset",
-            "X-Title": "PDF to Dataset Converter"
-        }
-        
-        payload = {
-            "model": OPENROUTER_MODEL,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            "temperature": 0.8,
-            "max_tokens": 2000
-        }
+        client = Client(
+            host=OLLAMA_BASE_URL,
+            headers={"Authorization": "Bearer " + OLLAMA_API_KEY}
+        )
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
 
-        response = requests.post(OPENROUTER_API_URL, json=payload, headers=headers, timeout=60)
-        response.raise_for_status()
-        
-        result = response.json()
-        content = result["choices"][0]["message"]["content"]
+        response_text = ""
+        for part in client.chat(OLLAMA_MODEL, messages=messages, stream=True):
+            message = part.get("message", {})
+            content_part = message.get("content", "")
+            if isinstance(content_part, list):
+                for item in content_part:
+                    if isinstance(item, dict) and item.get("type") == "text":
+                        response_text += item.get("text", "")
+                    elif isinstance(item, str):
+                        response_text += item
+            elif isinstance(content_part, dict):
+                if content_part.get("type") == "text":
+                    response_text += content_part.get("text", "")
+                elif isinstance(content_part, str):
+                    response_text += content_part
+            elif isinstance(content_part, str):
+                response_text += content_part
+
+        content = response_text
+
+        if isinstance(content, list):
+            text_parts = []
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    text_parts.append(item.get("text", ""))
+                elif isinstance(item, str):
+                    text_parts.append(item)
+            content = "".join(text_parts)
+        elif isinstance(content, dict) and content.get("type") == "text":
+            content = content.get("text", "")
 
         questions = None
         if isinstance(content, str):
@@ -430,11 +447,8 @@ Generate questions that test understanding of plot, characters, themes, vocabula
         print(f"  Response preview: {content[:400]}")
         return []
 
-    except requests.exceptions.RequestException as e:
-        print(f"\n  Error calling OpenRouter API: {e}")
-        return []
-    except (json.JSONDecodeError, KeyError, IndexError) as e:
-        print(f"\n  Error parsing AI response: {e}")
+    except Exception as e:
+        print(f"\n  Error calling Ollama API: {e}")
         return []
 
 
@@ -514,9 +528,9 @@ def main():
 
     novel_title = extract_novel_title(pdf_path)
 
-    if not OPENROUTER_API_KEY:
-        print("Error: OPENROUTER_API_KEY is required for direct AI question generation.")
-        print("Set the environment variable OPENROUTER_API_KEY or create a .env file with OPENROUTER_API_KEY=your_key")
+    if not OLLAMA_API_KEY:
+        print("Error: OLLAMA_API_KEY is required for direct AI question generation.")
+        print("Set the environment variable OLLAMA_API_KEY or create a .env file with OLLAMA_API_KEY=your_key")
         sys.exit(1)
 
     full_text, page_texts, num_pages = extract_text_from_pdf(pdf_path)
@@ -524,7 +538,7 @@ def main():
     print(f"\nProcessing novel: {novel_title}")
     chunks = split_into_chunks(full_text)
 
-    print(f"  AI-powered generation enabled (Model: {OPENROUTER_MODEL})")
+    print(f"  AI-powered generation enabled (Model: {OLLAMA_MODEL})")
     print(f"  Questions per chunk: {QUESTIONS_PER_CHUNK}")
     print(f"\nGenerating questions from {len(chunks)} chunks...")
     all_qa = []
@@ -561,7 +575,7 @@ def main():
     display_preview(dataset)
 
     print(f"\n  Output files:")
-    print(f"    JSONL (OpenAI format): {jsonl_path}")
+    print(f"    JSONL: {jsonl_path}")
     print(f"    Pretty-printed JSON:   {pretty_path}")
     print(f"\n{'='*60}\n")
 

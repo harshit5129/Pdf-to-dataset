@@ -7,17 +7,21 @@ A simple PDF-to-question dataset generator using OpenRouter AI.
 Create a `.env` file in the repository root or export environment variables before running.
 
 Required:
-- `OPENROUTER_API_KEY` — your OpenRouter API key
+- `OLLAMA_API_KEY` — your Ollama API key
 
 Optional:
-- `OPENROUTER_MODEL` — model to use (default: `qwen/qwen3.6-plus:free`)
+- `OLLAMA_BASE_URL` — Ollama host URL (default: `https://ollama.com`)
+- `OLLAMA_MODEL` — model to use (default: `gpt-oss:120b`)
 - `QUESTIONS_PER_CHUNK` — number of AI questions to generate per text chunk (default: `8`)
+
+If `OPENAI_API_KEY` is already set, the script will also use that value as a fallback for `OLLAMA_API_KEY`.
 
 Example `.env` file:
 
 ```
-OPENROUTER_API_KEY=your_openrouter_api_key_here
-OPENROUTER_MODEL=qwen/qwen3.6-plus:free
+OLLAMA_API_KEY=your_ollama_api_key_here
+OLLAMA_BASE_URL=https://ollama.com
+OLLAMA_MODEL=kimi-k2.5:cloud
 QUESTIONS_PER_CHUNK=8
 ```
 
