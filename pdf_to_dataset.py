@@ -8,8 +8,13 @@ from collections import Counter
 import time
 import random
 from ollama import Client
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
 
 random.seed(42)
+
+# Thread-safe lock for progress tracking
+progress_lock = Lock()
 
 
 def load_env_file(env_path=None):
@@ -456,6 +461,12 @@ def generate_questions_from_chunk(chunk, novel_title, chunk_idx):
     return generate_ai_questions(chunk, novel_title, chunk_idx, num_questions=QUESTIONS_PER_CHUNK)
 
 
+def process_chunk_worker(chunk_idx, chunk, novel_title):
+    """Worker function for multithreading - processes a single chunk."""
+    qa = generate_questions_from_chunk(chunk, novel_title, chunk_idx)
+    return chunk_idx, qa
+
+
 def convert_to_gpt_format(qa_pairs, novel_title):
     dataset = []
     system_prompt = f"You are a helpful assistant analyzing the web novel '{novel_title}'. Answer questions based on the text content provided."
@@ -540,18 +551,33 @@ def main():
 
     print(f"  AI-powered generation enabled (Model: {OLLAMA_MODEL})")
     print(f"  Questions per chunk: {QUESTIONS_PER_CHUNK}")
+    print(f"  Using multithreading for parallel processing")
     print(f"\nGenerating questions from {len(chunks)} chunks...")
     all_qa = []
     start_time = time.time()
-
-    for i, chunk in enumerate(chunks):
-        qa = generate_questions_from_chunk(chunk, novel_title, i)
-        all_qa.extend(qa)
-        progress = (i + 1) / len(chunks) * 100
-        elapsed = time.time() - start_time
-        avg_time = elapsed / (i + 1)
-        eta = avg_time * (len(chunks) - i - 1)
-        print(f"  [{i+1}/{len(chunks)}] {progress:.0f}% | {len(qa)} Qs | Total: {len(all_qa)} | ETA: {eta:.0f}s", end='\r', flush=True)
+    
+    max_workers = min(4, len(chunks))  # Use up to 4 threads
+    chunk_results = {}
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(process_chunk_worker, i, chunk, novel_title): i for i, chunk in enumerate(chunks)}
+        completed_chunks = 0
+        
+        for future in as_completed(futures):
+            chunk_idx, qa = future.result()
+            chunk_results[chunk_idx] = qa
+            completed_chunks += 1
+            
+            progress = (completed_chunks / len(chunks)) * 100
+            elapsed = time.time() - start_time
+            avg_time = elapsed / completed_chunks
+            eta = avg_time * (len(chunks) - completed_chunks)
+            print(f"  [{completed_chunks}/{len(chunks)}] {progress:.0f}% | {len(qa)} Qs | ETA: {eta:.0f}s", end='\r', flush=True)
+    
+    # Reconstruct results in original order
+    for i in range(len(chunks)):
+        if i in chunk_results:
+            all_qa.extend(chunk_results[i])
 
     elapsed_total = time.time() - start_time
     print(f"\n  Generation complete in {elapsed_total:.1f}s")
