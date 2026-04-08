@@ -7,6 +7,7 @@ import fitz
 from collections import Counter
 import time
 import random
+import ollama
 from ollama import Client
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
@@ -37,7 +38,19 @@ def load_env_file(env_path=None):
 
 load_env_file()
 
-VALID_QUESTION_TYPES = {"comprehension", "character", "plot", "vocabulary", "true_false", "fill_blank", "open_ended", "theme"}
+VALID_QUESTION_TYPES = {
+    "comprehension",
+    "character",
+    "plot",
+    "vocabulary",
+    "true_false",
+    "fill_blank",
+    "open_ended",
+    "theme",
+    "roleplay",
+    "creative",
+    "analysis",
+}
 MIN_QUESTION_LENGTH = 10
 MIN_ANSWER_LENGTH = 5
 
@@ -49,7 +62,10 @@ def validate_question(q):
         return False, "Missing required fields"
     if q["type"] not in VALID_QUESTION_TYPES:
         return False, f"Invalid type: {q['type']}"
-    if not isinstance(q["question"], str) or len(q["question"].strip()) < MIN_QUESTION_LENGTH:
+    if (
+        not isinstance(q["question"], str)
+        or len(q["question"].strip()) < MIN_QUESTION_LENGTH
+    ):
         return False, "Question too short"
     if not isinstance(q["answer"], str) or len(q["answer"].strip()) < MIN_ANSWER_LENGTH:
         return False, "Answer too short"
@@ -68,23 +84,25 @@ def validate_ai_questions(questions, chunk_idx):
         else:
             invalid_count += 1
             if invalid_count <= 3:
-                print(f"    [WARN] Chunk {chunk_idx+1}, Q{i+1}: {reason}")
+                print(f"    [WARN] Chunk {chunk_idx + 1}, Q{i + 1}: {reason}")
     if invalid_count > 3:
         print(f"    [WARN] ... and {invalid_count - 3} more invalid questions skipped")
     return valid_questions, invalid_count
 
 
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "https://ollama.com")
-OLLAMA_API_KEY = os.environ.get("OLLAMA_API_KEY", "") or os.environ.get("OPENAI_API_KEY", "")
+OLLAMA_API_KEY = os.environ.get("OLLAMA_API_KEY", "") or os.environ.get(
+    "OPENAI_API_KEY", ""
+)
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "gpt-oss:120b")
 QUESTIONS_PER_CHUNK = int(os.environ.get("QUESTIONS_PER_CHUNK", "8"))
 USE_AI_GENERATION = True
 
 
 def extract_text_from_pdf(pdf_path):
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"  PDF QUESTION GENERATOR")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print(f"\nOpening PDF: {pdf_path}")
 
     doc = fitz.open(pdf_path)
@@ -100,7 +118,7 @@ def extract_text_from_pdf(pdf_path):
         page_texts.append(text)
         full_text = full_text + text + "\n"
         progress = (i + 1) / num_pages * 100
-        print(f"  Extracting page {i+1}/{num_pages} [{progress:.0f}%]", end='\r')
+        print(f"  Extracting page {i + 1}/{num_pages} [{progress:.0f}%]", end="\r")
 
     print(f"\n  Extraction complete! Total characters: {len(full_text)}")
     doc.close()
@@ -110,12 +128,14 @@ def extract_text_from_pdf(pdf_path):
 def extract_novel_title(pdf_path):
     basename = os.path.basename(pdf_path)
     title = os.path.splitext(basename)[0]
-    title = re.sub(r'[_-]+', ' ', title)
+    title = re.sub(r"[_-]+", " ", title)
     return title.strip()
 
 
 def split_into_chunks(text, min_chunk_size=500, max_chunk_size=1500):
-    chapter_pattern = r'(?i)(?:chapter|part|prologue|epilogue|volume)\s+\d+[a-z]*\s*:?\s*'
+    chapter_pattern = (
+        r"(?i)(?:chapter|part|prologue|epilogue|volume)\s+\d+[a-z]*\s*:?\s*"
+    )
 
     chapters = re.split(chapter_pattern, text)
     chapters = [c.strip() for c in chapters if len(c.strip()) > 100]
@@ -125,7 +145,7 @@ def split_into_chunks(text, min_chunk_size=500, max_chunk_size=1500):
         return chapters
 
     print("  No chapter markers found, splitting by paragraphs...")
-    paragraphs = re.split(r'\n\s*\n', text)
+    paragraphs = re.split(r"\n\s*\n", text)
     paragraphs = [p.strip() for p in paragraphs if len(p.strip()) > 50]
 
     chunks = []
@@ -147,23 +167,107 @@ def split_into_chunks(text, min_chunk_size=500, max_chunk_size=1500):
 
 
 def extract_names(text):
-    sentences = re.split(r'[.!?]+', text)
+    sentences = re.split(r"[.!?]+", text)
     names = set()
 
     for sentence in sentences[:50]:
         words = sentence.split()
         for i, word in enumerate(words):
             if word.istitle() and len(word) > 2 and word.isalpha():
-                if i + 1 < len(words) and words[i+1].istitle() and words[i+1].isalpha():
-                    names.add(f"{word} {words[i+1]}")
-                elif word not in {'The', 'This', 'That', 'There', 'Their', 'These', 'Those', 'What', 'When', 'Where', 'Which', 'While', 'With', 'Without', 'Within', 'About', 'Above', 'After', 'Before', 'Between', 'Through', 'During', 'Under', 'Again', 'Further', 'Then', 'Once', 'Here', 'All', 'Each', 'Every', 'Both', 'Few', 'More', 'Most', 'Other', 'Some', 'Such', 'Only', 'Own', 'Same', 'So', 'Than', 'Too', 'Very', 'Can', 'Will', 'Just', 'Don', 'Now', 'And', 'But', 'For', 'Nor', 'Not', 'Or', 'Yet', 'From', 'Into', 'Onto', 'Upon', 'Toward', 'Until', 'Against', 'Among', 'Beside', 'Beyond', 'Except', 'Inside', 'Outside', 'Across', 'Around', 'Behind', 'Below', 'Beneath', 'Beside', 'Near', 'Since', 'Throughout'}:
+                if (
+                    i + 1 < len(words)
+                    and words[i + 1].istitle()
+                    and words[i + 1].isalpha()
+                ):
+                    names.add(f"{word} {words[i + 1]}")
+                elif word not in {
+                    "The",
+                    "This",
+                    "That",
+                    "There",
+                    "Their",
+                    "These",
+                    "Those",
+                    "What",
+                    "When",
+                    "Where",
+                    "Which",
+                    "While",
+                    "With",
+                    "Without",
+                    "Within",
+                    "About",
+                    "Above",
+                    "After",
+                    "Before",
+                    "Between",
+                    "Through",
+                    "During",
+                    "Under",
+                    "Again",
+                    "Further",
+                    "Then",
+                    "Once",
+                    "Here",
+                    "All",
+                    "Each",
+                    "Every",
+                    "Both",
+                    "Few",
+                    "More",
+                    "Most",
+                    "Other",
+                    "Some",
+                    "Such",
+                    "Only",
+                    "Own",
+                    "Same",
+                    "So",
+                    "Than",
+                    "Too",
+                    "Very",
+                    "Can",
+                    "Will",
+                    "Just",
+                    "Don",
+                    "Now",
+                    "And",
+                    "But",
+                    "For",
+                    "Nor",
+                    "Not",
+                    "Or",
+                    "Yet",
+                    "From",
+                    "Into",
+                    "Onto",
+                    "Upon",
+                    "Toward",
+                    "Until",
+                    "Against",
+                    "Among",
+                    "Beside",
+                    "Beyond",
+                    "Except",
+                    "Inside",
+                    "Outside",
+                    "Across",
+                    "Around",
+                    "Behind",
+                    "Below",
+                    "Beneath",
+                    "Beside",
+                    "Near",
+                    "Since",
+                    "Throughout",
+                }:
                     names.add(word)
 
     return list(names)[:30]
 
 
 def extract_key_sentences(text, max_sentences=20):
-    sentences = re.split(r'(?<=[.!?])\s+', text)
+    sentences = re.split(r"(?<=[.!?])\s+", text)
     sentences = [s.strip() for s in sentences if 30 < len(s) < 300]
 
     key_sentences = []
@@ -178,7 +282,7 @@ def extract_key_sentences(text, max_sentences=20):
 
 def generate_comprehension_questions(chunk, novel_title):
     questions = []
-    sentences = re.split(r'(?<=[.!?])\s+', chunk)
+    sentences = re.split(r"(?<=[.!?])\s+", chunk)
     sentences = [s.strip() for s in sentences if 40 < len(s) < 250]
 
     templates = [
@@ -192,16 +296,16 @@ def generate_comprehension_questions(chunk, novel_title):
         answer = sentence
 
         if len(sentence) > 80:
-            question_text = sentence[:sentence.find(',', 40) if ',' in sentence[40:] else 60]
+            question_text = sentence[
+                : sentence.find(",", 40) if "," in sentence[40:] else 60
+            ]
         else:
             question_text = sentence[:50]
 
         question = f"Based on the novel '{novel_title}', what happens in the passage that mentions: \"{question_text}...\"?"
-        questions.append({
-            "type": "comprehension",
-            "question": question,
-            "answer": answer
-        })
+        questions.append(
+            {"type": "comprehension", "question": question, "answer": answer}
+        )
 
     return questions
 
@@ -214,7 +318,11 @@ def generate_character_questions(chunk, novel_title, names):
         return questions
 
     for name in names[:8]:
-        matching_sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', chunk) if name in s and len(s) > 30]
+        matching_sentences = [
+            s.strip()
+            for s in re.split(r"(?<=[.!?])\s+", chunk)
+            if name in s and len(s) > 30
+        ]
 
         if matching_sentences:
             answer = matching_sentences[0]
@@ -225,11 +333,9 @@ def generate_character_questions(chunk, novel_title, names):
                 f"What does {name} do in this passage?",
             ]
             question = random.choice(templates)
-            questions.append({
-                "type": "character",
-                "question": question,
-                "answer": answer
-            })
+            questions.append(
+                {"type": "character", "question": question, "answer": answer}
+            )
 
     return questions
 
@@ -237,16 +343,31 @@ def generate_character_questions(chunk, novel_title, names):
 def generate_plot_questions(chunk, novel_title):
 
     questions = []
-    sentences = re.split(r'(?<=[.!?])\s+', chunk)
-    action_sentences = [s.strip() for s in sentences if any(w in s.lower() for w in ['then', 'after', 'before', 'when', 'suddenly', 'finally', 'eventually', 'however', 'therefore', 'consequently']) and 40 < len(s) < 250]
+    sentences = re.split(r"(?<=[.!?])\s+", chunk)
+    action_sentences = [
+        s.strip()
+        for s in sentences
+        if any(
+            w in s.lower()
+            for w in [
+                "then",
+                "after",
+                "before",
+                "when",
+                "suddenly",
+                "finally",
+                "eventually",
+                "however",
+                "therefore",
+                "consequently",
+            ]
+        )
+        and 40 < len(s) < 250
+    ]
 
     for sentence in action_sentences[:5]:
-        question = f"What leads to the events described in: \"{sentence[:60]}...\"?"
-        questions.append({
-            "type": "plot",
-            "question": question,
-            "answer": sentence
-        })
+        question = f'What leads to the events described in: "{sentence[:60]}..."?'
+        questions.append({"type": "plot", "question": question, "answer": sentence})
 
     return questions
 
@@ -254,36 +375,63 @@ def generate_plot_questions(chunk, novel_title):
 def generate_vocabulary_questions(chunk, novel_title):
     """Generate vocabulary-in-context questions."""
     questions = []
-    words = re.findall(r'\b[A-Za-z]{6,}\b', chunk)
+    words = re.findall(r"\b[A-Za-z]{6,}\b", chunk)
     unique_words = list(set(w for w in words if w[0].islower()))[:10]
 
     for word in unique_words[:5]:
-        matching_sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', chunk) if word.lower() in s.lower() and len(s) > 30]
+        matching_sentences = [
+            s.strip()
+            for s in re.split(r"(?<=[.!?])\s+", chunk)
+            if word.lower() in s.lower() and len(s) > 30
+        ]
         if matching_sentences:
             context = matching_sentences[0]
             question = f"In the context of '{novel_title}', what does '{word}' mean in this passage: \"{context[:80]}...\"?"
-            questions.append({
-                "type": "vocabulary",
-                "question": question,
-                "answer": f"In this context, '{word}' is used in the sentence: \"{context}\" The meaning relates to how it's used in this passage."
-            })
+            questions.append(
+                {
+                    "type": "vocabulary",
+                    "question": question,
+                    "answer": f"In this context, '{word}' is used in the sentence: \"{context}\" The meaning relates to how it's used in this passage.",
+                }
+            )
 
     return questions
 
 
 def generate_truefalse_questions(chunk, novel_title):
-    
+
     questions = []
-    sentences = re.split(r'(?<=[.!?])\s+', chunk)
-    declarative = [s.strip() for s in sentences if 30 < len(s) < 200 and not s.startswith(('What', 'How', 'Why', 'When', 'Where', 'Who', 'Which', 'Is ', 'Are ', 'Do ', 'Does '))]
+    sentences = re.split(r"(?<=[.!?])\s+", chunk)
+    declarative = [
+        s.strip()
+        for s in sentences
+        if 30 < len(s) < 200
+        and not s.startswith(
+            (
+                "What",
+                "How",
+                "Why",
+                "When",
+                "Where",
+                "Who",
+                "Which",
+                "Is ",
+                "Are ",
+                "Do ",
+                "Does ",
+            )
+        )
+    ]
 
     for sentence in declarative[:5]:
         question = f"True or False: In '{novel_title}', the following statement is accurate: \"{sentence}\""
-        questions.append({
-            "type": "true_false",
-            "question": question,
-            "answer": f"True. The text states: \"{sentence}\""
-        })
+        questions.append(
+            {
+                "type": "true_false",
+                "question": question,
+                "answer": f'True. The text states: "{sentence}"',
+            }
+        )
 
     return questions
 
@@ -291,7 +439,7 @@ def generate_truefalse_questions(chunk, novel_title):
 def generate_fillblank_questions(chunk, novel_title):
 
     questions = []
-    sentences = re.split(r'(?<=[.!?])\s+', chunk)
+    sentences = re.split(r"(?<=[.!?])\s+", chunk)
     good_sentences = [s.strip() for s in sentences if 40 < len(s) < 200]
 
     for sentence in good_sentences[:5]:
@@ -306,14 +454,16 @@ def generate_fillblank_questions(chunk, novel_title):
             continue
 
         words[blank_idx] = "_____"
-        blanked = ' '.join(words)
+        blanked = " ".join(words)
 
         question = f"Fill in the blank from '{novel_title}': {blanked}"
-        questions.append({
-            "type": "fill_blank",
-            "question": question,
-            "answer": f"The missing word is '{blank_word}'. Complete sentence: \"{sentence}\""
-        })
+        questions.append(
+            {
+                "type": "fill_blank",
+                "question": question,
+                "answer": f"The missing word is '{blank_word}'. Complete sentence: \"{sentence}\"",
+            }
+        )
 
     return questions
 
@@ -321,7 +471,7 @@ def generate_fillblank_questions(chunk, novel_title):
 def generate_openended_questions(chunk, novel_title):
     """Generate open-ended analytical questions."""
     questions = []
-    sentences = re.split(r'(?<=[.!?])\s+', chunk)
+    sentences = re.split(r"(?<=[.!?])\s+", chunk)
     meaningful = [s.strip() for s in sentences if 50 < len(s) < 250]
 
     if meaningful:
@@ -329,27 +479,46 @@ def generate_openended_questions(chunk, novel_title):
         templates = [
             f"Why do you think the events in '{novel_title}' unfold as described: \"{sample[:80]}...\"?",
             f"How does the passage \"{sample[:60]}...\" contribute to the overall narrative of '{novel_title}'?",
-            f"What is the significance of the scene where the text describes: \"{sample[:70]}...\"?",
+            f'What is the significance of the scene where the text describes: "{sample[:70]}..."?',
         ]
         question = random.choice(templates)
-        questions.append({
-            "type": "open_ended",
-            "question": question,
-            "answer": f"Based on the text: \"{sample}\" This passage contributes to the narrative by developing the story and characters within the context of {novel_title}."
-        })
+        questions.append(
+            {
+                "type": "open_ended",
+                "question": question,
+                "answer": f'Based on the text: "{sample}" This passage contributes to the narrative by developing the story and characters within the context of {novel_title}.',
+            }
+        )
 
     return questions
 
 
-def generate_ai_questions(chunk, novel_title, chunk_idx, num_questions=8):
+def generate_ai_questions(
+    chunk, novel_title, chunk_idx, num_questions=8, web_info=None
+):
     """Generate high-quality questions using Ollama."""
     if not OLLAMA_API_KEY:
-        print(f"\n  Warning: OLLAMA_API_KEY not set. Cannot generate questions.")
+        print(f"\n Warning: OLLAMA_API_KEY not set. Cannot generate questions.")
         return []
 
-    system_prompt = f"""You are an expert literary analyst and educator specializing in creating high-quality comprehension questions for novels and literature. 
+    web_context = ""
+    if web_info:
+        for query, info in list(web_info.items())[:2]:
+            if isinstance(info, str):
+                web_context += info[:300] + "\n"
 
-Your task is to generate thoughtful, diverse questions based on excerpts from the novel '{novel_title}'. 
+    roleplay_instructions = """
+9. roleplay - Character perspective and immersion questions
+10. creative - Creative writing and imagination prompts
+11. analysis - Deep analytical and comparative questions
+
+For roleplay questions, ask the reader to respond from a character's perspective.
+For creative questions, prompt imaginative responses about alternate scenarios.
+For analysis questions, ask for deeper interpretation and literary analysis."""
+
+    system_prompt = f"""You are an expert literary analyst and educator specializing in creating high-quality comprehension questions for novels and literature.
+
+Your task is to generate thoughtful, diverse questions based on excerpts from the novel '{novel_title}'.
 
 Create questions across these categories:
 1. comprehension - Understanding plot and events
@@ -359,7 +528,7 @@ Create questions across these categories:
 5. true_false - Factual statements about the text
 6. fill_blank - Missing word from quoted text
 7. open_ended - Analytical and interpretive questions
-8. theme - Thematic analysis and deeper meaning
+8. theme - Thematic analysis and deeper meaning{roleplay_instructions}
 
 Requirements:
 - Questions should be specific to the text provided
@@ -367,6 +536,8 @@ Requirements:
 - Vary question difficulty (basic comprehension to deep analysis)
 - Make questions natural and engaging, not mechanical
 - Answers should be 2-4 sentences with textual evidence
+- Include roleplay questions asking to respond from character perspectives
+- Include creative prompts for alternate scenarios
 
 Respond ONLY with valid JSON in this exact format:
 [
@@ -385,12 +556,11 @@ Generate exactly {num_questions} questions total, with variety in types."""
 {chunk[:3000]}
 ---
 
-Generate questions that test understanding of plot, characters, themes, vocabulary, and deeper meaning. Make questions specific to this exact text."""
+Generate questions that test understanding of plot, characters, themes, vocabulary, and deeper meaning. Include roleplay and creative questions. Make questions specific to this exact text.{f" Additional context about this novel: {web_context[:200]}" if web_context else ""}"""
 
     try:
         client = Client(
-            host=OLLAMA_BASE_URL,
-            headers={"Authorization": "Bearer " + OLLAMA_API_KEY}
+            host=OLLAMA_BASE_URL, headers={"Authorization": "Bearer " + OLLAMA_API_KEY}
         )
         messages = [
             {"role": "system", "content": system_prompt},
@@ -430,7 +600,7 @@ Generate questions that test understanding of plot, characters, themes, vocabula
 
         questions = None
         if isinstance(content, str):
-            json_match = re.search(r'(\[[\s\S]*\])', content)
+            json_match = re.search(r"(\[[\s\S]*\])", content)
             if json_match:
                 candidate = json_match.group(1)
                 try:
@@ -445,7 +615,9 @@ Generate questions that test understanding of plot, characters, themes, vocabula
 
         if isinstance(questions, list):
             valid_questions, invalid_count = validate_ai_questions(questions, chunk_idx)
-            print(f"\n  [AI] Chunk {chunk_idx + 1}: {len(valid_questions)} valid, {invalid_count} invalid (from {len(questions)} generated)")
+            print(
+                f"\n  [AI] Chunk {chunk_idx + 1}: {len(valid_questions)} valid, {invalid_count} invalid (from {len(questions)} generated)"
+            )
             return valid_questions
 
         print(f"\n  [WARN] Could not parse valid AI response for chunk {chunk_idx + 1}")
@@ -457,13 +629,19 @@ Generate questions that test understanding of plot, characters, themes, vocabula
         return []
 
 
-def generate_questions_from_chunk(chunk, novel_title, chunk_idx):
-    return generate_ai_questions(chunk, novel_title, chunk_idx, num_questions=QUESTIONS_PER_CHUNK)
+def generate_questions_from_chunk(chunk, novel_title, chunk_idx, web_info=None):
+    return generate_ai_questions(
+        chunk,
+        novel_title,
+        chunk_idx,
+        num_questions=QUESTIONS_PER_CHUNK,
+        web_info=web_info,
+    )
 
 
-def process_chunk_worker(chunk_idx, chunk, novel_title):
+def process_chunk_worker(chunk_idx, chunk, novel_title, web_info=None):
     """Worker function for multithreading - processes a single chunk."""
-    qa = generate_questions_from_chunk(chunk, novel_title, chunk_idx)
+    qa = generate_questions_from_chunk(chunk, novel_title, chunk_idx, web_info)
     return chunk_idx, qa
 
 
@@ -476,7 +654,7 @@ def convert_to_gpt_format(qa_pairs, novel_title):
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": qa["question"]},
-                {"role": "assistant", "content": qa["answer"]}
+                {"role": "assistant", "content": qa["answer"]},
             ]
         }
         dataset.append(entry)
@@ -487,38 +665,158 @@ def convert_to_gpt_format(qa_pairs, novel_title):
 def display_summary(num_pages, num_chunks, qa_pairs, novel_title, elapsed_time=0.0):
     type_counts = Counter(qa["type"] for qa in qa_pairs)
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"  CONVERSION SUMMARY")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print(f"  Novel:              {novel_title}")
     print(f"  Pages processed:    {num_pages}")
     print(f"  Text chunks:        {num_chunks}")
     print(f"  Total Q&A pairs:    {len(qa_pairs)}")
     print(f"  Generation time:    {elapsed_time:.1f}s")
     if elapsed_time > 0 and len(qa_pairs) > 0:
-        print(f"  Avg per question:   {elapsed_time/len(qa_pairs):.2f}s")
+        print(f"  Avg per question:   {elapsed_time / len(qa_pairs):.2f}s")
     print(f"\n  Question Type Breakdown:")
 
     for qtype, count in sorted(type_counts.items(), key=lambda x: -x[1]):
-        bar = '#' * (count // 2)
+        bar = "#" * (count // 2)
         print(f"    {qtype:<15} {count:>3} {bar}")
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
 
 
 def display_preview(dataset, count=3):
     print(f"\n  PREVIEW (first {min(count, len(dataset))} entries):")
-    print(f"  {'-'*56}")
+    print(f"  {'-' * 56}")
 
     for i, entry in enumerate(dataset[:count]):
-        print(f"\n  Entry {i+1}:")
+        print(f"\n  Entry {i + 1}:")
         for msg in entry["messages"]:
             role = msg["role"]
             content = msg["content"]
             if len(content) > 120:
                 content = content[:120] + "..."
             print(f"    [{role}]: {content}")
-        print(f"  {'-'*56}")
+        print(f"  {'-' * 56}")
+
+
+def collect_web_novel_info(novel_title):
+    """Collect basic information about web novels using web search."""
+    print(f"\n{'=' * 60}")
+    print(" COLLECTING WEB NOVEL INFO")
+    print(f"{'=' * 60}")
+
+    web_info = {}
+
+    search_queries = [
+        f"What is {novel_title} web novel about?",
+        f"{novel_title} web novel synopsis plot summary",
+        f"{novel_title} web novel main characters",
+        f"{novel_title} web novel author genre tags",
+        f"{novel_title} web novel world setting",
+    ]
+
+    print(f"\nSearching for information about '{novel_title}'...")
+
+    client = Client(
+        host=OLLAMA_BASE_URL, headers={"Authorization": "Bearer " + OLLAMA_API_KEY}
+    )
+
+    for query in search_queries:
+        try:
+            print(f"\n Query: {query[:50]}...")
+            response = client.web_search(query)
+            if response:
+                web_info[query] = response
+                print(f" ✓ Info collected")
+                time.sleep(0.5)
+        except Exception as e:
+            print(f" ✗ Search failed: {e}")
+
+    print(f"\n Web info collection complete. {len(web_info)} queries successful.")
+    return web_info
+
+
+def generate_web_novel_context_questions(web_info, novel_title):
+    """Generate context questions based on web searched information."""
+    questions = []
+
+    context_text = ""
+    for query, info in web_info.items():
+        if isinstance(info, str):
+            context_text += info + "\n\n"
+        elif isinstance(info, list):
+            context_text += " ".join(str(item) for item in info) + "\n\n"
+
+    if not context_text.strip():
+        return questions
+
+    context_questions = [
+        {
+            "type": "comprehension",
+            "question": f"What is the web novel '{novel_title}' about?",
+            "answer": context_text[:500] if len(context_text) > 500 else context_text,
+        },
+        {
+            "type": "theme",
+            "question": f"What are the main themes explored in '{novel_title}'?",
+            "answer": f"Based on available information: {context_text[:400]}",
+        },
+        {
+            "type": "open_ended",
+            "question": f"Describe the genre and setting of '{novel_title}'.",
+            "answer": context_text[:400] if len(context_text) > 400 else context_text,
+        },
+    ]
+
+    questions.extend(context_questions)
+    return questions
+
+
+def generate_roleplay_questions(novel_title, chunk_text, web_info=None):
+    """Generate role-playing and character immersion questions."""
+    questions = []
+
+    roleplay_prompts = [
+        {
+            "type": "roleplay",
+            "question": f"You are a character in '{novel_title}'. Describe your thoughts and feelings about the events in this passage.",
+            "answer": f"As a character in '{novel_title}', I would reflect deeply on these events... [Based on: {chunk_text[:200]}]",
+        },
+        {
+            "type": "roleplay",
+            "question": f"Imagine you are the protagonist of '{novel_title}'. How would you react to the situation described?",
+            "answer": f"As the protagonist, I would approach this situation with... [Context: {chunk_text[:200]}]",
+        },
+        {
+            "type": "creative",
+            "question": f"Write a diary entry from the perspective of a character in '{novel_title}' after these events.",
+            "answer": f"Dear Diary, Today's events in '{novel_title}' have left me... [Based on the passage: {chunk_text[:150]}]",
+        },
+        {
+            "type": "analysis",
+            "question": f"How would the story of '{novel_title}' change if a key decision in this passage was different?",
+            "answer": f"If the decision in this passage had been different, the story would unfold as... [Passage: {chunk_text[:200]}]",
+        },
+    ]
+
+    questions.extend(roleplay_prompts)
+    return questions
+
+
+def generate_all_question_types(chunk, novel_title, chunk_idx, names, web_info=None):
+    """Generate all types of questions including roleplay and creative."""
+    all_questions = []
+
+    all_questions.extend(generate_comprehension_questions(chunk, novel_title))
+    all_questions.extend(generate_character_questions(chunk, novel_title, names))
+    all_questions.extend(generate_plot_questions(chunk, novel_title))
+    all_questions.extend(generate_vocabulary_questions(chunk, novel_title))
+    all_questions.extend(generate_truefalse_questions(chunk, novel_title))
+    all_questions.extend(generate_fillblank_questions(chunk, novel_title))
+    all_questions.extend(generate_openended_questions(chunk, novel_title))
+    all_questions.extend(generate_roleplay_questions(novel_title, chunk, web_info))
+
+    return all_questions
 
 
 def main():
@@ -526,11 +824,13 @@ def main():
         pdf_path = sys.argv[1]
     else:
         pdf_dir = os.path.dirname(os.path.abspath(__file__))
-        pdf_files = [f for f in os.listdir(pdf_dir) if f.lower().endswith('.pdf')]
+        pdf_files = [f for f in os.listdir(pdf_dir) if f.lower().endswith(".pdf")]
         if pdf_files:
             pdf_path = os.path.join(pdf_dir, pdf_files[0])
         else:
-            print("Error: No PDF file found. Usage: python pdf_to_dataset.py <path_to_pdf>")
+            print(
+                "Error: No PDF file found. Usage: python pdf_to_dataset.py <path_to_pdf>"
+            )
             sys.exit(1)
 
     if not os.path.exists(pdf_path):
@@ -541,8 +841,12 @@ def main():
 
     if not OLLAMA_API_KEY:
         print("Error: OLLAMA_API_KEY is required for direct AI question generation.")
-        print("Set the environment variable OLLAMA_API_KEY or create a .env file with OLLAMA_API_KEY=your_key")
+        print(
+            "Set the environment variable OLLAMA_API_KEY or create a .env file with OLLAMA_API_KEY=your_key"
+        )
         sys.exit(1)
+
+    web_info = collect_web_novel_info(novel_title)
 
     full_text, page_texts, num_pages = extract_text_from_pdf(pdf_path)
 
@@ -555,25 +859,35 @@ def main():
     print(f"\nGenerating questions from {len(chunks)} chunks...")
     all_qa = []
     start_time = time.time()
-    
-    max_workers = min(4, len(chunks))  # Use up to 4 threads
+
+    web_info_questions = generate_web_novel_context_questions(web_info, novel_title)
+    all_qa.extend(web_info_questions)
+
+    max_workers = min(4, len(chunks))
     chunk_results = {}
-    
+
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(process_chunk_worker, i, chunk, novel_title): i for i, chunk in enumerate(chunks)}
+        futures = {
+            executor.submit(process_chunk_worker, i, chunk, novel_title, web_info): i
+            for i, chunk in enumerate(chunks)
+        }
         completed_chunks = 0
-        
+
         for future in as_completed(futures):
             chunk_idx, qa = future.result()
             chunk_results[chunk_idx] = qa
             completed_chunks += 1
-            
+
             progress = (completed_chunks / len(chunks)) * 100
             elapsed = time.time() - start_time
             avg_time = elapsed / completed_chunks
             eta = avg_time * (len(chunks) - completed_chunks)
-            print(f"  [{completed_chunks}/{len(chunks)}] {progress:.0f}% | {len(qa)} Qs | ETA: {eta:.0f}s", end='\r', flush=True)
-    
+            print(
+                f"  [{completed_chunks}/{len(chunks)}] {progress:.0f}% | {len(qa)} Qs | ETA: {eta:.0f}s",
+                end="\r",
+                flush=True,
+            )
+
     # Reconstruct results in original order
     for i in range(len(chunks)):
         if i in chunk_results:
@@ -588,22 +902,17 @@ def main():
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
     jsonl_path = os.path.join(script_dir, "dataset.json")
-    pretty_path = os.path.join(script_dir, "dataset_pretty.json")
 
-    with open(jsonl_path, 'w', encoding='utf-8') as f:
+    with open(jsonl_path, "w", encoding="utf-8") as f:
         for entry in dataset:
-            f.write(json.dumps(entry, ensure_ascii=False) + '\n')
-
-    with open(pretty_path, 'w', encoding='utf-8') as f:
-        json.dump(dataset, f, indent=2, ensure_ascii=False)
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
     display_summary(num_pages, len(chunks), all_qa, novel_title, elapsed_total)
     display_preview(dataset)
 
-    print(f"\n  Output files:")
-    print(f"    JSONL: {jsonl_path}")
-    print(f"    Pretty-printed JSON:   {pretty_path}")
-    print(f"\n{'='*60}\n")
+    print(f"\n Output file:")
+    print(f" JSONL: {jsonl_path}")
+    print(f"\n{'=' * 60}\n")
 
 
 if __name__ == "__main__":

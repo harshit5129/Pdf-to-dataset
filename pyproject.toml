@@ -1,0 +1,14 @@
+[project]
+name = "pdf-to-dataset"
+version = "0.1.0"
+description = "Convert PDF novels to AI training datasets with diverse question types"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "pymupdf",
+    "ollama",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
